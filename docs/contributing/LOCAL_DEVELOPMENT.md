@@ -1,21 +1,10 @@
 # Local Development
 
-If you are looking to contribute you will need to have a local development
-environment. See the
-[Developer Install](../installation/020_INSTALL_MANUAL.md#developer-install) for
-full details.
-
-Broadly this involves cloning the repository, installing the pre-reqs, and
-InvokeAI (in editable form). Assuming this is working, choose your area of
-focus.
+If you want to contribute, you will need to set up a [local development environment](./dev-environment.md).
 
 ## Documentation
 
-We use [mkdocs](https://www.mkdocs.org) for our documentation with the
-[material theme](https://squidfunk.github.io/mkdocs-material/). Documentation is
-written in markdown files under the `./docs` folder and then built into a static
-website for hosting with GitHub Pages at
-[invoke-ai.github.io/InvokeAI](https://invoke-ai.github.io/InvokeAI).
+We use [mkdocs](https://www.mkdocs.org) for our documentation with the [material theme](https://squidfunk.github.io/mkdocs-material/). Documentation is written in markdown files under the `./docs` folder and then built into a static website for hosting with GitHub Pages at [invoke-ai.github.io/InvokeAI](https://invoke-ai.github.io/InvokeAI).
 
 To contribute to the documentation you'll need to install the dependencies. Note
 the use of `"`.
@@ -35,46 +24,34 @@ access.
 
 ## Backend
 
-The backend is contained within the `./invokeai/backend` folder structure. To
-get started however please install the development dependencies.
+The backend is contained within the `./invokeai/backend` and `./invokeai/app` directories.
+To get started please install the development dependencies.
 
 From the root of the repository run the following command. Note the use of `"`.
 
 ```zsh
-pip install ".[test]"
+pip install ".[dev,test]"
 ```
 
-This in an optional group of packages which is defined within the
-`pyproject.toml` and will be required for testing the changes you make the the
-code.
+These are optional groups of packages which are defined within the `pyproject.toml`
+and will be required for testing the changes you make to the code.
 
-### Running Tests
+### Tests
 
-We use [pytest](https://docs.pytest.org/en/7.2.x/) for our test suite. Tests can
-be found under the `./tests` folder and can be run with a single `pytest`
-command. Optionally, to review test coverage you can append `--cov`.
+See the [tests documentation](./TESTS.md) for information about running and writing tests.
 
-```zsh
-pytest --cov
-```
+### Reloading Changes
 
-Test outcomes and coverage will be reported in the terminal. In addition a more
-detailed report is created in both XML and HTML format in the `./coverage`
-folder. The HTML one in particular can help identify missing statements
-requiring tests to ensure coverage. This can be run by opening
-`./coverage/html/index.html`.
+Experimenting with changes to the Python source code is a drag if you have to re-start the server —
+and re-load those multi-gigabyte models —
+after every change.
 
-For example.
+For a faster development workflow, add the `--dev_reload` flag when starting the server.
+The server will watch for changes to all the Python files in the `invokeai` directory and apply those changes to the
+running server on the fly.
 
-```zsh
-pytest --cov; open ./coverage/html/index.html
-```
-
-??? info "HTML coverage report output"
-
-    ![html-overview](../assets/contributing/html-overview.png)
-
-    ![html-detail](../assets/contributing/html-detail.png)
+This will allow you to avoid restarting the server (and reloading models) in most cases, but there are some caveats; see
+the [jurigged documentation](https://github.com/breuleux/jurigged#caveats) for details.
 
 ## Front End
 
@@ -153,6 +130,23 @@ for the python interpreter to run in. This will default to your `venv` python,
 and so you'll have access to the same python environment as the InvokeAI app.
 
 This is _super_ handy.
+
+#### Enabling Type-Checking with Pylance
+
+We use python's typing system in InvokeAI. PR reviews will include checking that types are present and correct. We don't enforce types with `mypy` at this time, but that is on the horizon.
+
+Using a code analysis tool to automatically type check your code (and types) is very important when writing with types. These tools provide immediate feedback in your editor when types are incorrect, and following their suggestions lead to fewer runtime bugs.
+
+Pylance, installed at the beginning of this guide, is the de-facto python LSP (language server protocol). It provides type checking in the editor (among many other features). Once installed, you do need to enable type checking manually:
+
+- Open a python file
+- Look along the status bar in VSCode for `{ } Python`
+- Click the `{ }`
+- Turn type checking on - basic is fine
+
+You'll now see red squiggly lines where type issues are detected. Hover your cursor over the indicated symbols to see what's wrong.
+
+In 99% of cases when the type checker says there is a problem, there really is a problem, and you should take some time to understand and resolve what it is pointing out.
 
 #### Debugging configs with `launch.json`
 
@@ -245,7 +239,7 @@ Consult the
 get it set up.
 
 Suggest using VSCode's included settings sync so that your remote dev host has
-all the same app settings and extensions automagically.
+all the same app settings and extensions automatically.
 
 ##### One remote dev gotcha
 

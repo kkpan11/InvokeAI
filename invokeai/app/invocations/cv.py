@@ -1,48 +1,26 @@
 # Copyright (c) 2022 Kyle Schouviller (https://github.com/kyle0654)
 
-from typing import Literal
 
 import cv2 as cv
 import numpy
 from PIL import Image, ImageOps
-from pydantic import BaseModel, Field
 
-from invokeai.app.models.image import ImageCategory, ImageField, ResourceOrigin
-from .baseinvocation import BaseInvocation, InvocationContext, InvocationConfig
-from .image import ImageOutput
-
-
-class CvInvocationConfig(BaseModel):
-    """Helper class to provide all OpenCV invocations with additional config"""
-
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {
-                "tags": ["cv", "image"],
-            },
-        }
+from invokeai.app.invocations.baseinvocation import BaseInvocation, invocation
+from invokeai.app.invocations.fields import ImageField, InputField, WithBoard, WithMetadata
+from invokeai.app.invocations.primitives import ImageOutput
+from invokeai.app.services.shared.invocation_context import InvocationContext
 
 
-class CvInpaintInvocation(BaseInvocation, CvInvocationConfig):
+@invocation("cv_inpaint", title="OpenCV Inpaint", tags=["opencv", "inpaint"], category="inpaint", version="1.3.1")
+class CvInpaintInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Simple inpaint using opencv."""
 
-    # fmt: off
-    type: Literal["cv_inpaint"] = "cv_inpaint"
-
-    # Inputs
-    image: ImageField = Field(default=None, description="The image to inpaint")
-    mask: ImageField = Field(default=None, description="The mask to use when inpainting")
-    # fmt: on
-
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {"title": "OpenCV Inpaint", "tags": ["opencv", "inpaint"]},
-        }
+    image: ImageField = InputField(description="The image to inpaint")
+    mask: ImageField = InputField(description="The mask to use when inpainting")
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
-        image = context.services.images.get_pil_image(self.image.image_name)
-        mask = context.services.images.get_pil_image(self.mask.image_name)
+        image = context.images.get_pil(self.image.image_name)
+        mask = context.images.get_pil(self.mask.image_name)
 
         # Convert to cv image/mask
         # TODO: consider making these utility functions
@@ -56,17 +34,6 @@ class CvInpaintInvocation(BaseInvocation, CvInvocationConfig):
         # TODO: consider making a utility function
         image_inpainted = Image.fromarray(cv.cvtColor(cv_inpainted, cv.COLOR_BGR2RGB))
 
-        image_dto = context.services.images.create(
-            image=image_inpainted,
-            image_origin=ResourceOrigin.INTERNAL,
-            image_category=ImageCategory.GENERAL,
-            node_id=self.id,
-            session_id=context.graph_execution_state_id,
-            is_intermediate=self.is_intermediate,
-        )
+        image_dto = context.images.save(image=image_inpainted)
 
-        return ImageOutput(
-            image=ImageField(image_name=image_dto.image_name),
-            width=image_dto.width,
-            height=image_dto.height,
-        )
+        return ImageOutput.build(image_dto)

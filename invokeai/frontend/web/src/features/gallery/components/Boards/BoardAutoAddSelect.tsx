@@ -1,84 +1,65 @@
-import { SelectItem } from '@mantine/core';
-import { createSelector } from '@reduxjs/toolkit';
-import { stateSelector } from 'app/store/store';
+import type { ComboboxOnChange, ComboboxOption } from '@invoke-ai/ui-library';
+import { Combobox, FormControl, FormLabel } from '@invoke-ai/ui-library';
 import { useAppDispatch, useAppSelector } from 'app/store/storeHooks';
-import { defaultSelectorOptions } from 'app/store/util/defaultMemoizeOptions';
-import IAIMantineSearchableSelect from 'common/components/IAIMantineSearchableSelect';
-import IAIMantineSelectItemWithTooltip from 'common/components/IAIMantineSelectItemWithTooltip';
+import { selectAutoAddBoardId, selectAutoAssignBoardOnClick } from 'features/gallery/store/gallerySelectors';
 import { autoAddBoardIdChanged } from 'features/gallery/store/gallerySlice';
-import { useCallback, useRef } from 'react';
+import { memo, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useListAllBoardsQuery } from 'services/api/endpoints/boards';
-
-const selector = createSelector(
-  [stateSelector],
-  ({ gallery, system }) => {
-    const { autoAddBoardId, autoAssignBoardOnClick } = gallery;
-    const { isProcessing } = system;
-
-    return {
-      autoAddBoardId,
-      autoAssignBoardOnClick,
-      isProcessing,
-    };
-  },
-  defaultSelectorOptions
-);
 
 const BoardAutoAddSelect = () => {
   const dispatch = useAppDispatch();
-  const { autoAddBoardId, autoAssignBoardOnClick, isProcessing } =
-    useAppSelector(selector);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const { boards, hasBoards } = useListAllBoardsQuery(undefined, {
-    selectFromResult: ({ data }) => {
-      const boards: SelectItem[] = [
-        {
-          label: 'None',
-          value: 'none',
-        },
-      ];
-      data?.forEach(({ board_id, board_name }) => {
-        boards.push({
-          label: board_name,
-          value: board_id,
-        });
-      });
-      return {
-        boards,
-        hasBoards: boards.length > 1,
-      };
-    },
-  });
+  const { t } = useTranslation();
+  const autoAddBoardId = useAppSelector(selectAutoAddBoardId);
+  const autoAssignBoardOnClick = useAppSelector(selectAutoAssignBoardOnClick);
+  const { options, hasBoards } = useListAllBoardsQuery(
+    {},
+    {
+      selectFromResult: ({ data }) => {
+        const options: ComboboxOption[] = [
+          {
+            label: t('common.none'),
+            value: 'none',
+          },
+        ].concat(
+          (data ?? []).map(({ board_id, board_name }) => ({
+            label: board_name,
+            value: board_id,
+          }))
+        );
+        return {
+          options,
+          hasBoards: options.length > 1,
+        };
+      },
+    }
+  );
 
-  const handleChange = useCallback(
-    (v: string | null) => {
+  const onChange = useCallback<ComboboxOnChange>(
+    (v) => {
       if (!v) {
         return;
       }
-
-      dispatch(autoAddBoardIdChanged(v));
+      dispatch(autoAddBoardIdChanged(v.value));
     },
     [dispatch]
   );
 
+  const value = useMemo(() => options.find((o) => o.value === autoAddBoardId), [options, autoAddBoardId]);
+
+  const noOptionsMessage = useCallback(() => t('boards.noMatching'), [t]);
+
   return (
-    <IAIMantineSearchableSelect
-      label="Auto-Add Board"
-      inputRef={inputRef}
-      autoFocus
-      placeholder={'Select a Board'}
-      value={autoAddBoardId}
-      data={boards}
-      nothingFound="No matching Boards"
-      itemComponent={IAIMantineSelectItemWithTooltip}
-      disabled={!hasBoards || autoAssignBoardOnClick || isProcessing}
-      filter={(value, item: SelectItem) =>
-        item.label?.toLowerCase().includes(value.toLowerCase().trim()) ||
-        item.value.toLowerCase().includes(value.toLowerCase().trim())
-      }
-      onChange={handleChange}
-    />
+    <FormControl isDisabled={!hasBoards || autoAssignBoardOnClick}>
+      <FormLabel>{t('boards.autoAddBoard')}</FormLabel>
+      <Combobox
+        value={value}
+        options={options}
+        onChange={onChange}
+        placeholder={t('boards.selectBoard')}
+        noOptionsMessage={noOptionsMessage}
+      />
+    </FormControl>
   );
 };
-
-export default BoardAutoAddSelect;
+export default memo(BoardAutoAddSelect);

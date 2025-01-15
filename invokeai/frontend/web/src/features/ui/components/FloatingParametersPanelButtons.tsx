@@ -1,102 +1,105 @@
-import { ChakraProps, Flex } from '@chakra-ui/react';
-import { createSelector } from '@reduxjs/toolkit';
-import { useAppDispatch, useAppSelector } from 'app/store/storeHooks';
-import IAIIconButton from 'common/components/IAIIconButton';
-import { requestCanvasRescale } from 'features/canvas/store/thunks/requestCanvasScale';
-import CancelButton from 'features/parameters/components/ProcessButtons/CancelButton';
-import InvokeButton from 'features/parameters/components/ProcessButtons/InvokeButton';
-import {
-  activeTabNameSelector,
-  uiSelector,
-} from 'features/ui/store/uiSelectors';
-import { setShouldShowParametersPanel } from 'features/ui/store/uiSlice';
-import { isEqual } from 'lodash-es';
-import { memo } from 'react';
+import { ButtonGroup, Flex, Icon, IconButton, spinAnimation, Tooltip, useShiftModifier } from '@invoke-ai/ui-library';
+import { useAppSelector } from 'app/store/storeHooks';
+import { ToolChooser } from 'features/controlLayers/components/Tool/ToolChooser';
+import { CanvasManagerProviderGate } from 'features/controlLayers/contexts/CanvasManagerProviderGate';
+import { useImageViewer } from 'features/gallery/components/ImageViewer/useImageViewer';
+import { useClearQueueDialog } from 'features/queue/components/ClearQueueConfirmationAlertDialog';
+import { InvokeButtonTooltip } from 'features/queue/components/InvokeButtonTooltip/InvokeButtonTooltip';
+import { useCancelCurrentQueueItem } from 'features/queue/hooks/useCancelCurrentQueueItem';
+import { useInvoke } from 'features/queue/hooks/useInvoke';
+import type { UsePanelReturn } from 'features/ui/hooks/usePanel';
+import { selectActiveTab } from 'features/ui/store/uiSelectors';
+import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  PiCircleNotchBold,
+  PiLightningFill,
+  PiSlidersHorizontalBold,
+  PiSparkleFill,
+  PiTrashSimpleBold,
+  PiXBold,
+} from 'react-icons/pi';
+import { useGetQueueStatusQuery } from 'services/api/endpoints/queue';
 
-import { FaSlidersH } from 'react-icons/fa';
-
-const floatingButtonStyles: ChakraProps['sx'] = {
-  borderStartStartRadius: 0,
-  borderEndStartRadius: 0,
-  shadow: '2xl',
+type Props = {
+  panelApi: UsePanelReturn;
 };
 
-export const floatingParametersPanelButtonSelector = createSelector(
-  [uiSelector, activeTabNameSelector],
-  (ui, activeTabName) => {
-    const {
-      shouldPinParametersPanel,
-      shouldUseCanvasBetaLayout,
-      shouldShowParametersPanel,
-    } = ui;
-
-    const canvasBetaLayoutCheck =
-      shouldUseCanvasBetaLayout && activeTabName === 'unifiedCanvas';
-
-    const shouldShowProcessButtons =
-      !canvasBetaLayoutCheck &&
-      (!shouldPinParametersPanel || !shouldShowParametersPanel);
-
-    const shouldShowParametersPanelButton =
-      !canvasBetaLayoutCheck &&
-      !shouldShowParametersPanel &&
-      ['txt2img', 'img2img', 'unifiedCanvas'].includes(activeTabName);
-
-    return {
-      shouldPinParametersPanel,
-      shouldShowParametersPanelButton,
-      shouldShowProcessButtons,
-    };
-  },
-  { memoizeOptions: { resultEqualityCheck: isEqual } }
-);
-
-const FloatingParametersPanelButtons = () => {
-  const dispatch = useAppDispatch();
+const FloatingSidePanelButtons = (props: Props) => {
   const { t } = useTranslation();
-  const {
-    shouldShowProcessButtons,
-    shouldShowParametersPanelButton,
-    shouldPinParametersPanel,
-  } = useAppSelector(floatingParametersPanelButtonSelector);
+  const queue = useInvoke();
+  const shift = useShiftModifier();
+  const tab = useAppSelector(selectActiveTab);
+  const imageViewer = useImageViewer();
+  const clearQueue = useClearQueueDialog();
+  const { data: queueStatus } = useGetQueueStatusQuery();
+  const cancelCurrent = useCancelCurrentQueueItem();
 
-  const handleShowOptionsPanel = () => {
-    dispatch(setShouldShowParametersPanel(true));
-    shouldPinParametersPanel && dispatch(requestCanvasRescale());
-  };
-
-  if (!shouldShowParametersPanelButton) {
-    return null;
-  }
+  const queueButtonIcon = useMemo(() => {
+    const isProcessing = (queueStatus?.queue.in_progress ?? 0) > 0;
+    if (!queue.isDisabled && isProcessing) {
+      return <Icon boxSize={6} as={PiCircleNotchBold} animation={spinAnimation} />;
+    }
+    if (shift) {
+      return <PiLightningFill />;
+    }
+    return <PiSparkleFill />;
+  }, [queue.isDisabled, queueStatus?.queue.in_progress, shift]);
 
   return (
-    <Flex
-      pos="absolute"
-      transform="translate(0, -50%)"
-      minW={8}
-      top="50%"
-      insetInlineStart="4.5rem"
-      direction="column"
-      gap={2}
-    >
-      <IAIIconButton
-        tooltip="Show Options Panel (O)"
-        tooltipProps={{ placement: 'top' }}
-        aria-label={t('accessibility.showOptionsPanel')}
-        onClick={handleShowOptionsPanel}
-        sx={floatingButtonStyles}
-      >
-        <FaSlidersH />
-      </IAIIconButton>
-      {shouldShowProcessButtons && (
-        <>
-          <InvokeButton iconButton sx={floatingButtonStyles} />
-          <CancelButton sx={floatingButtonStyles} />
-        </>
+    <Flex pos="absolute" transform="translate(0, -50%)" top="50%" insetInlineStart={2} direction="column" gap={2}>
+      {tab === 'canvas' && !imageViewer.isOpen && (
+        <CanvasManagerProviderGate>
+          <ToolChooser />
+        </CanvasManagerProviderGate>
       )}
+      <ButtonGroup orientation="vertical" h={48}>
+        <Tooltip label={t('accessibility.toggleLeftPanel')} placement="end">
+          <IconButton
+            aria-label={t('accessibility.toggleLeftPanel')}
+            onClick={props.panelApi.toggle}
+            icon={<PiSlidersHorizontalBold />}
+            flexGrow={1}
+          />
+        </Tooltip>
+        <InvokeButtonTooltip prepend={shift} placement="end">
+          <IconButton
+            aria-label={t('queue.queueBack')}
+            onClick={shift ? queue.queueFront : queue.queueBack}
+            isLoading={queue.isLoading}
+            isDisabled={queue.isDisabled}
+            icon={queueButtonIcon}
+            colorScheme="invokeYellow"
+            flexGrow={1}
+          />
+        </InvokeButtonTooltip>
+        <Tooltip label={t('queue.cancelTooltip')} placement="end">
+          <IconButton
+            isDisabled={cancelCurrent.isDisabled}
+            isLoading={cancelCurrent.isLoading}
+            aria-label={t('queue.cancelTooltip')}
+            icon={<PiXBold />}
+            onClick={cancelCurrent.cancelQueueItem}
+            colorScheme="error"
+            flexGrow={1}
+          />
+        </Tooltip>
+
+        <Tooltip label={t('queue.clearTooltip')} placement="end">
+          <IconButton
+            isDisabled={clearQueue.isDisabled}
+            isLoading={clearQueue.isLoading}
+            aria-label={t('queue.clearTooltip')}
+            icon={<PiTrashSimpleBold />}
+            colorScheme="error"
+            onClick={clearQueue.openDialog}
+            data-testid={t('queue.clear')}
+            flexGrow={1}
+          />
+        </Tooltip>
+      </ButtonGroup>
     </Flex>
   );
 };
 
-export default memo(FloatingParametersPanelButtons);
+export default memo(FloatingSidePanelButtons);

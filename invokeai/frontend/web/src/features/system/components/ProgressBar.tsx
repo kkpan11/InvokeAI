@@ -1,41 +1,62 @@
-import { Progress } from '@chakra-ui/react';
-import { createSelector } from '@reduxjs/toolkit';
-import { useAppSelector } from 'app/store/storeHooks';
-import { SystemState } from 'features/system/store/systemSlice';
-import { isEqual } from 'lodash-es';
-import { memo } from 'react';
+import { Progress } from '@invoke-ai/ui-library';
+import { useStore } from '@nanostores/react';
+import { useCurrentDestination } from 'features/queue/hooks/useCurrentDestination';
+import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { systemSelector } from '../store/systemSelectors';
-
-const progressBarSelector = createSelector(
-  systemSelector,
-  (system: SystemState) => {
-    return {
-      isProcessing: system.isProcessing,
-      currentStep: system.currentStep,
-      totalSteps: system.totalSteps,
-      currentStatusHasSteps: system.currentStatusHasSteps,
-    };
-  },
-  {
-    memoizeOptions: { resultEqualityCheck: isEqual },
-  }
-);
+import { useGetQueueStatusQuery } from 'services/api/endpoints/queue';
+import { $isConnected, $lastProgressEvent } from 'services/events/stores';
 
 const ProgressBar = () => {
   const { t } = useTranslation();
-  const { isProcessing, currentStep, totalSteps, currentStatusHasSteps } =
-    useAppSelector(progressBarSelector);
+  const destination = useCurrentDestination();
+  const { data: queueStatus } = useGetQueueStatusQuery();
+  const isConnected = useStore($isConnected);
+  const lastProgressEvent = useStore($lastProgressEvent);
+  const value = useMemo(() => {
+    if (!lastProgressEvent) {
+      return 0;
+    }
+    return (lastProgressEvent.percentage ?? 0) * 100;
+  }, [lastProgressEvent]);
 
-  const value = currentStep ? Math.round((currentStep * 100) / totalSteps) : 0;
+  const isIndeterminate = useMemo(() => {
+    if (!isConnected) {
+      return false;
+    }
+
+    if (!queueStatus?.queue.in_progress) {
+      return false;
+    }
+
+    if (!lastProgressEvent) {
+      return true;
+    }
+
+    if (lastProgressEvent.percentage === null) {
+      return true;
+    }
+
+    return false;
+  }, [isConnected, lastProgressEvent, queueStatus?.queue.in_progress]);
+
+  const colorScheme = useMemo(() => {
+    if (destination === 'canvas') {
+      return 'invokeGreen';
+    } else if (destination === 'gallery') {
+      return 'invokeBlue';
+    } else {
+      return 'base';
+    }
+  }, [destination]);
 
   return (
     <Progress
       value={value}
       aria-label={t('accessibility.invokeProgressBar')}
-      isIndeterminate={isProcessing && !currentStatusHasSteps}
-      height="full"
-      colorScheme="accent"
+      isIndeterminate={isIndeterminate}
+      h={2}
+      w="full"
+      colorScheme={colorScheme}
     />
   );
 };

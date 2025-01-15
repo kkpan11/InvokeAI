@@ -1,90 +1,124 @@
-import { MenuGroup, MenuItem, MenuList } from '@chakra-ui/react';
+import type { ContextMenuProps } from '@invoke-ai/ui-library';
+import { ContextMenu, MenuGroup, MenuItem, MenuList } from '@invoke-ai/ui-library';
 import { createSelector } from '@reduxjs/toolkit';
-import { stateSelector } from 'app/store/store';
 import { useAppDispatch, useAppSelector } from 'app/store/storeHooks';
-import { ContextMenu, ContextMenuProps } from 'chakra-ui-contextmenu';
+import { $boardToDelete } from 'features/gallery/components/Boards/DeleteBoardModal';
+import { selectAutoAddBoardId, selectAutoAssignBoardOnClick } from 'features/gallery/store/gallerySelectors';
 import { autoAddBoardIdChanged } from 'features/gallery/store/gallerySlice';
-import { MouseEvent, memo, useCallback, useMemo } from 'react';
-import { FaPlus } from 'react-icons/fa';
+import { useFeatureStatus } from 'features/system/hooks/useFeatureStatus';
+import { toast } from 'features/toast/toast';
+import { memo, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { PiArchiveBold, PiArchiveFill, PiDownloadBold, PiPlusBold, PiTrashSimpleBold } from 'react-icons/pi';
+import { useUpdateBoardMutation } from 'services/api/endpoints/boards';
+import { useBulkDownloadImagesMutation } from 'services/api/endpoints/images';
 import { useBoardName } from 'services/api/hooks/useBoardName';
-import { BoardDTO } from 'services/api/types';
-import { menuListMotionProps } from 'theme/components/menu';
-import GalleryBoardContextMenuItems from './GalleryBoardContextMenuItems';
-import NoBoardContextMenuItems from './NoBoardContextMenuItems';
-import { BoardId } from 'features/gallery/store/types';
+import type { BoardDTO } from 'services/api/types';
 
 type Props = {
-  board?: BoardDTO;
-  board_id: BoardId;
+  board: BoardDTO;
   children: ContextMenuProps<HTMLDivElement>['children'];
-  setBoardToDelete?: (board?: BoardDTO) => void;
 };
 
-const BoardContextMenu = memo(
-  ({ board, board_id, setBoardToDelete, children }: Props) => {
-    const dispatch = useAppDispatch();
+const BoardContextMenu = ({ board, children }: Props) => {
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const autoAssignBoardOnClick = useAppSelector(selectAutoAssignBoardOnClick);
+  const selectIsSelectedForAutoAdd = useMemo(
+    () => createSelector(selectAutoAddBoardId, (autoAddBoardId) => board.board_id === autoAddBoardId),
+    [board.board_id]
+  );
 
-    const selector = useMemo(
-      () =>
-        createSelector(stateSelector, ({ gallery, system }) => {
-          const isAutoAdd = gallery.autoAddBoardId === board_id;
-          const isProcessing = system.isProcessing;
-          const autoAssignBoardOnClick = gallery.autoAssignBoardOnClick;
-          return { isAutoAdd, isProcessing, autoAssignBoardOnClick };
-        }),
-      [board_id]
-    );
+  const [updateBoard] = useUpdateBoardMutation();
 
-    const { isAutoAdd, isProcessing, autoAssignBoardOnClick } =
-      useAppSelector(selector);
-    const boardName = useBoardName(board_id);
+  const isSelectedForAutoAdd = useAppSelector(selectIsSelectedForAutoAdd);
+  const boardName = useBoardName(board.board_id);
+  const isBulkDownloadEnabled = useFeatureStatus('bulkDownload');
 
-    const handleSetAutoAdd = useCallback(() => {
-      dispatch(autoAddBoardIdChanged(board_id));
-    }, [board_id, dispatch]);
+  const [bulkDownload] = useBulkDownloadImagesMutation();
 
-    const skipEvent = useCallback((e: MouseEvent<HTMLDivElement>) => {
-      e.preventDefault();
-    }, []);
+  const handleSetAutoAdd = useCallback(() => {
+    dispatch(autoAddBoardIdChanged(board.board_id));
+  }, [board.board_id, dispatch]);
 
-    return (
-      <ContextMenu<HTMLDivElement>
-        menuProps={{ size: 'sm', isLazy: true }}
-        menuButtonProps={{
-          bg: 'transparent',
-          _hover: { bg: 'transparent' },
-        }}
-        renderMenu={() => (
-          <MenuList
-            sx={{ visibility: 'visible !important' }}
-            motionProps={menuListMotionProps}
-            onContextMenu={skipEvent}
-          >
-            <MenuGroup title={boardName}>
-              <MenuItem
-                icon={<FaPlus />}
-                isDisabled={isAutoAdd || isProcessing || autoAssignBoardOnClick}
-                onClick={handleSetAutoAdd}
-              >
-                Auto-add to this Board
-              </MenuItem>
-              {!board && <NoBoardContextMenuItems />}
-              {board && (
-                <GalleryBoardContextMenuItems
-                  board={board}
-                  setBoardToDelete={setBoardToDelete}
-                />
-              )}
-            </MenuGroup>
-          </MenuList>
-        )}
-      >
-        {children}
-      </ContextMenu>
-    );
-  }
-);
+  const handleBulkDownload = useCallback(() => {
+    bulkDownload({ image_names: [], board_id: board.board_id });
+  }, [board.board_id, bulkDownload]);
 
-BoardContextMenu.displayName = 'HoverableBoard';
+  const handleArchive = useCallback(async () => {
+    try {
+      await updateBoard({
+        board_id: board.board_id,
+        changes: { archived: true },
+      }).unwrap();
+    } catch (error) {
+      toast({
+        status: 'error',
+        title: 'Unable to archive board',
+      });
+    }
+  }, [board.board_id, updateBoard]);
 
-export default BoardContextMenu;
+  const handleUnarchive = useCallback(() => {
+    updateBoard({
+      board_id: board.board_id,
+      changes: { archived: false },
+    });
+  }, [board.board_id, updateBoard]);
+
+  const setAsBoardToDelete = useCallback(() => {
+    $boardToDelete.set(board);
+  }, [board]);
+
+  const renderMenuFunc = useCallback(
+    () => (
+      <MenuList visibility="visible">
+        <MenuGroup title={boardName}>
+          {!autoAssignBoardOnClick && (
+            <MenuItem icon={<PiPlusBold />} isDisabled={isSelectedForAutoAdd} onClick={handleSetAutoAdd}>
+              {isSelectedForAutoAdd ? t('boards.selectedForAutoAdd') : t('boards.menuItemAutoAdd')}
+            </MenuItem>
+          )}
+          {isBulkDownloadEnabled && (
+            <MenuItem icon={<PiDownloadBold />} onClickCapture={handleBulkDownload}>
+              {t('boards.downloadBoard')}
+            </MenuItem>
+          )}
+
+          {board.archived && (
+            <MenuItem icon={<PiArchiveBold />} onClick={handleUnarchive}>
+              {t('boards.unarchiveBoard')}
+            </MenuItem>
+          )}
+
+          {!board.archived && (
+            <MenuItem icon={<PiArchiveFill />} onClick={handleArchive}>
+              {t('boards.archiveBoard')}
+            </MenuItem>
+          )}
+
+          <MenuItem color="error.300" icon={<PiTrashSimpleBold />} onClick={setAsBoardToDelete} isDestructive>
+            {t('boards.deleteBoard')}
+          </MenuItem>
+        </MenuGroup>
+      </MenuList>
+    ),
+    [
+      boardName,
+      autoAssignBoardOnClick,
+      isSelectedForAutoAdd,
+      handleSetAutoAdd,
+      t,
+      isBulkDownloadEnabled,
+      handleBulkDownload,
+      board.archived,
+      handleUnarchive,
+      handleArchive,
+      setAsBoardToDelete,
+    ]
+  );
+
+  return <ContextMenu renderMenu={renderMenuFunc}>{children}</ContextMenu>;
+};
+
+export default memo(BoardContextMenu);

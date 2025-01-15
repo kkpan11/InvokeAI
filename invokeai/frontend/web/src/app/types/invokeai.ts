@@ -1,85 +1,7 @@
-import {
-  // CONTROLNET_MODELS,
-  CONTROLNET_PROCESSORS,
-} from 'features/controlNet/store/constants';
-import { InvokeTabName } from 'features/ui/store/tabMap';
-import { O } from 'ts-toolbelt';
-
-// These are old types from the model management UI
-
-// export type ModelStatus = 'active' | 'cached' | 'not loaded';
-
-// export type Model = {
-//   status: ModelStatus;
-//   description: string;
-//   weights: string;
-//   config?: string;
-//   vae?: string;
-//   width?: number;
-//   height?: number;
-//   default?: boolean;
-//   format?: string;
-// };
-
-// export type DiffusersModel = {
-//   status: ModelStatus;
-//   description: string;
-//   repo_id?: string;
-//   path?: string;
-//   vae?: {
-//     repo_id?: string;
-//     path?: string;
-//   };
-//   format?: string;
-//   default?: boolean;
-// };
-
-// export type ModelList = Record<string, Model & DiffusersModel>;
-
-// export type FoundModel = {
-//   name: string;
-//   location: string;
-// };
-
-// export type InvokeModelConfigProps = {
-//   name: string | undefined;
-//   description: string | undefined;
-//   config: string | undefined;
-//   weights: string | undefined;
-//   vae: string | undefined;
-//   width: number | undefined;
-//   height: number | undefined;
-//   default: boolean | undefined;
-//   format: string | undefined;
-// };
-
-// export type InvokeDiffusersModelConfigProps = {
-//   name: string | undefined;
-//   description: string | undefined;
-//   repo_id: string | undefined;
-//   path: string | undefined;
-//   default: boolean | undefined;
-//   format: string | undefined;
-//   vae: {
-//     repo_id: string | undefined;
-//     path: string | undefined;
-//   };
-// };
-
-// export type InvokeModelConversionProps = {
-//   model_name: string;
-//   save_location: string;
-//   custom_location: string | null;
-// };
-
-// export type InvokeModelMergingProps = {
-//   models_to_merge: string[];
-//   alpha: number;
-//   interp: 'weighted_sum' | 'sigmoid' | 'inv_sigmoid' | 'add_difference';
-//   force: boolean;
-//   merged_model_name: string;
-//   model_merge_save_path: string | null;
-// };
+import type { FilterType } from 'features/controlLayers/store/filters';
+import type { ParameterPrecision, ParameterScheduler } from 'features/parameters/types/parameterSchemas';
+import type { TabName } from 'features/ui/store/uiTypes';
+import type { PartialDeep } from 'type-fest';
 
 /**
  * A disable-able application feature
@@ -97,8 +19,13 @@ export type AppFeature =
   | 'dynamicPrompting'
   | 'batches'
   | 'syncModels'
-  | 'multiselect';
-
+  | 'multiselect'
+  | 'pauseQueue'
+  | 'resumeQueue'
+  | 'invocationCache'
+  | 'bulkDownload'
+  | 'starterModels'
+  | 'hfToken';
 /**
  * A disable-able Stable Diffusion feature
  */
@@ -113,7 +40,18 @@ export type SDFeature =
   | 'hires'
   | 'lora'
   | 'embedding'
-  | 'vae';
+  | 'vae'
+  | 'hrf';
+
+export type NumericalParameterConfig = {
+  initial: number;
+  sliderMin: number;
+  sliderMax: number;
+  numberInputMin: number;
+  numberInputMax: number;
+  fineStep: number;
+  coarseStep: number;
+};
 
 /**
  * Configuration options for the InvokeAI UI.
@@ -124,71 +62,60 @@ export type AppConfig = {
    * Whether or not we should update image urls when image loading errors
    */
   shouldUpdateImagesOnConnect: boolean;
-  disabledTabs: InvokeTabName[];
+  shouldFetchMetadataFromApi: boolean;
+  /**
+   * Sets a size limit for outputs on the upscaling tab. This is a maximum dimension, so the actual max number of pixels
+   * will be the square of this value.
+   */
+  maxUpscaleDimension?: number;
+  allowPrivateBoards: boolean;
+  allowPrivateStylePresets: boolean;
+  disabledTabs: TabName[];
   disabledFeatures: AppFeature[];
   disabledSDFeatures: SDFeature[];
-  canRestoreDeletedImagesFromBin: boolean;
+  nodesAllowlist: string[] | undefined;
+  nodesDenylist: string[] | undefined;
+  metadataFetchDebounce?: number;
+  workflowFetchDebounce?: number;
+  isLocal?: boolean;
+  maxImageUploadCount?: number;
   sd: {
     defaultModel?: string;
     disabledControlNetModels: string[];
-    disabledControlNetProcessors: (keyof typeof CONTROLNET_PROCESSORS)[];
-    iterations: {
-      initial: number;
-      min: number;
-      sliderMax: number;
-      inputMax: number;
-      fineStep: number;
-      coarseStep: number;
-    };
-    width: {
-      initial: number;
-      min: number;
-      sliderMax: number;
-      inputMax: number;
-      fineStep: number;
-      coarseStep: number;
-    };
-    height: {
-      initial: number;
-      min: number;
-      sliderMax: number;
-      inputMax: number;
-      fineStep: number;
-      coarseStep: number;
-    };
-    steps: {
-      initial: number;
-      min: number;
-      sliderMax: number;
-      inputMax: number;
-      fineStep: number;
-      coarseStep: number;
-    };
-    guidance: {
-      initial: number;
-      min: number;
-      sliderMax: number;
-      inputMax: number;
-      fineStep: number;
-      coarseStep: number;
-    };
-    img2imgStrength: {
-      initial: number;
-      min: number;
-      sliderMax: number;
-      inputMax: number;
-      fineStep: number;
-      coarseStep: number;
-    };
+    disabledControlNetProcessors: FilterType[];
+    // Core parameters
+    iterations: NumericalParameterConfig;
+    width: NumericalParameterConfig; // initial value comes from model
+    height: NumericalParameterConfig; // initial value comes from model
+    steps: NumericalParameterConfig;
+    guidance: NumericalParameterConfig;
+    cfgRescaleMultiplier: NumericalParameterConfig;
+    img2imgStrength: NumericalParameterConfig;
+    scheduler?: ParameterScheduler;
+    vaePrecision?: ParameterPrecision;
+    // Canvas
+    boundingBoxHeight: NumericalParameterConfig; // initial value comes from model
+    boundingBoxWidth: NumericalParameterConfig; // initial value comes from model
+    scaledBoundingBoxHeight: NumericalParameterConfig; // initial value comes from model
+    scaledBoundingBoxWidth: NumericalParameterConfig; // initial value comes from model
+    canvasCoherenceStrength: NumericalParameterConfig;
+    canvasCoherenceEdgeSize: NumericalParameterConfig;
+    infillTileSize: NumericalParameterConfig;
+    infillPatchmatchDownscaleSize: NumericalParameterConfig;
+    // Misc advanced
+    clipSkip: NumericalParameterConfig; // slider and input max are ignored for this, because the values depend on the model
+    maskBlur: NumericalParameterConfig;
+    hrfStrength: NumericalParameterConfig;
     dynamicPrompts: {
-      maxPrompts: {
-        initial: number;
-        min: number;
-        sliderMax: number;
-        inputMax: number;
-      };
+      maxPrompts: NumericalParameterConfig;
     };
+    ca: {
+      weight: NumericalParameterConfig;
+    };
+  };
+  flux: {
+    guidance: NumericalParameterConfig;
   };
 };
 
-export type PartialAppConfig = O.Partial<AppConfig, 'deep'>;
+export type PartialAppConfig = PartialDeep<AppConfig>;

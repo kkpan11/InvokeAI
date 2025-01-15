@@ -1,94 +1,44 @@
 // TODO: enable this at some point
-// import graphlib from '@dagrejs/graphlib';
-// import { useCallback } from 'react';
-// import { Connection, Node, useReactFlow } from 'reactflow';
-// import { InvocationValue } from '../types/types';
+import { useStore } from '@nanostores/react';
+import { useAppSelector, useAppStore } from 'app/store/storeHooks';
+import { $edgePendingUpdate, $templates } from 'features/nodes/store/nodesSlice';
+import { selectNodesSlice } from 'features/nodes/store/selectors';
+import { validateConnection } from 'features/nodes/store/util/validateConnection';
+import { selectShouldShouldValidateGraph } from 'features/nodes/store/workflowSettingsSlice';
+import { useCallback } from 'react';
+import type { Connection } from 'reactflow';
 
-// export const useIsValidConnection = () => {
-//   const flow = useReactFlow();
+/**
+ * NOTE: The logic here must be duplicated in `invokeai/frontend/web/src/features/nodes/store/util/makeIsConnectionValidSelector.ts`
+ * TODO: Figure out how to do this without duplicating all the logic
+ */
 
-//   // Check if an in-progress connection is valid
-//   const isValidConnection = useCallback(
-//     ({ source, sourceHandle, target, targetHandle }: Connection): boolean => {
-//       const edges = flow.getEdges();
-//       const nodes = flow.getNodes();
+export const useIsValidConnection = () => {
+  const store = useAppStore();
+  const templates = useStore($templates);
+  const shouldValidateGraph = useAppSelector(selectShouldShouldValidateGraph);
+  const isValidConnection = useCallback(
+    ({ source, sourceHandle, target, targetHandle }: Connection): boolean => {
+      // Connection must have valid targets
+      if (!(source && sourceHandle && target && targetHandle)) {
+        return false;
+      }
+      const edgePendingUpdate = $edgePendingUpdate.get();
+      const { nodes, edges } = selectNodesSlice(store.getState());
 
-//       // Connection must have valid targets
-//       if (!(source && sourceHandle && target && targetHandle)) {
-//         return false;
-//       }
+      const validationResult = validateConnection(
+        { source, sourceHandle, target, targetHandle },
+        nodes,
+        edges,
+        templates,
+        edgePendingUpdate,
+        shouldValidateGraph
+      );
 
-//       // Connection is invalid if target already has a connection
-//       if (
-//         edges.find((edge) => {
-//           return edge.target === target && edge.targetHandle === targetHandle;
-//         })
-//       ) {
-//         return false;
-//       }
+      return validationResult.isValid;
+    },
+    [templates, shouldValidateGraph, store]
+  );
 
-//       // Find the source and target nodes
-//       const sourceNode = flow.getNode(source) as Node<InvocationValue>;
-
-//       const targetNode = flow.getNode(target) as Node<InvocationValue>;
-
-//       // Conditional guards against undefined nodes/handles
-//       if (!(sourceNode && targetNode && sourceNode.data && targetNode.data)) {
-//         return false;
-//       }
-
-//       // Connection types must be the same for a connection
-//       if (
-//         sourceNode.data.outputs[sourceHandle].type !==
-//         targetNode.data.inputs[targetHandle].type
-//       ) {
-//         return false;
-//       }
-
-//       // Graphs much be acyclic (no loops!)
-
-//       /**
-//        * TODO: use `graphlib.alg.findCycles()` to identify strong connections
-//        *
-//        * this validation func only runs when the cursor hits the second handle of the connection,
-//        * and only on that second handle - so it cannot tell us exhaustively which connections
-//        * are valid.
-//        *
-//        * ideally, we check when the connection starts to calculate all invalid handles at once.
-//        *
-//        * requires making a new graphlib graph - and calling `findCycles()` - for each potential
-//        * handle. instead of using the `isValidConnection` prop, it would use the `onConnectStart`
-//        * prop.
-//        *
-//        * the strong connections should be stored in global state.
-//        *
-//        * then, `isValidConnection` would simple loop through the strong connections and if the
-//        * source and target are in a single strong connection, return false.
-//        *
-//        * and also, we can use this knowledge to style every handle when a connection starts,
-//        * which is otherwise not possible.
-//        */
-
-//       // build a graphlib graph
-//       const g = new graphlib.Graph();
-
-//       nodes.forEach((n) => {
-//         g.setNode(n.id);
-//       });
-
-//       edges.forEach((e) => {
-//         g.setEdge(e.source, e.target);
-//       });
-
-//       // Add the candidate edge to the graph
-//       g.setEdge(source, target);
-
-//       return graphlib.alg.isAcyclic(g);
-//     },
-//     [flow]
-//   );
-
-//   return isValidConnection;
-// };
-
-export const useIsValidConnection = () => () => true;
+  return isValidConnection;
+};

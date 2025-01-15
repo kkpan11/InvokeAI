@@ -3,14 +3,16 @@ This module defines a singleton object, "invisible_watermark" that
 wraps the invisible watermark model. It respects the global "invisible_watermark"
 configuration variable, that allows the watermarking to be supressed.
 """
-import numpy as np
-import cv2
-from PIL import Image
-from imwatermark import WatermarkEncoder
-from invokeai.app.services.config import InvokeAIAppConfig
-import invokeai.backend.util.logging as logger
 
-config = InvokeAIAppConfig.get_config()
+import cv2
+import numpy as np
+from imwatermark import WatermarkEncoder
+from PIL import Image
+
+import invokeai.backend.util.logging as logger
+from invokeai.app.services.config.config_default import get_config
+
+config = get_config()
 
 
 class InvisibleWatermark:
@@ -19,13 +21,7 @@ class InvisibleWatermark:
     """
 
     @classmethod
-    def invisible_watermark_available(self) -> bool:
-        return config.invisible_watermark
-
-    @classmethod
-    def add_watermark(self, image: Image, watermark_text: str) -> Image:
-        if not self.invisible_watermark_available():
-            return image
+    def add_watermark(cls, image: Image.Image, watermark_text: str) -> Image.Image:
         logger.debug(f'Applying invisible watermark "{watermark_text}"')
         bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
         encoder = WatermarkEncoder()

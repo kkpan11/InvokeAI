@@ -1,57 +1,35 @@
-from typing import Literal, Optional, Union, List, Annotated
-from pydantic import BaseModel, Field
-import re
-
-from .baseinvocation import BaseInvocation, BaseInvocationOutput, InvocationContext, InvocationConfig
-from .model import ClipField
-
-from ...backend.util.devices import torch_dtype
-from ...backend.stable_diffusion.diffusion import InvokeAIDiffuserComponent
-from ...backend.model_management import BaseModelType, ModelType, SubModelType, ModelPatcher
+from typing import Iterator, List, Optional, Tuple, Union, cast
 
 import torch
 from compel import Compel, ReturnedEmbeddingsType
 from compel.prompt_parser import Blend, Conjunction, CrossAttentionControlSubstitute, FlattenedPrompt, Fragment
-from ...backend.util.devices import torch_dtype
-from ...backend.model_management import ModelType
-from ...backend.model_management.models import ModelNotFoundException
-from ...backend.model_management.lora import ModelPatcher
-from ...backend.stable_diffusion.diffusion import InvokeAIDiffuserComponent
-from .baseinvocation import BaseInvocation, BaseInvocationOutput, InvocationConfig, InvocationContext
-from .model import ClipField
-from dataclasses import dataclass
+from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 
+from invokeai.app.invocations.baseinvocation import BaseInvocation, BaseInvocationOutput, invocation, invocation_output
+from invokeai.app.invocations.fields import (
+    ConditioningField,
+    FieldDescriptions,
+    Input,
+    InputField,
+    OutputField,
+    TensorField,
+    UIComponent,
+)
+from invokeai.app.invocations.model import CLIPField
+from invokeai.app.invocations.primitives import ConditioningOutput
+from invokeai.app.services.shared.invocation_context import InvocationContext
+from invokeai.app.util.ti_utils import generate_ti_list
+from invokeai.backend.model_patcher import ModelPatcher
+from invokeai.backend.patches.layer_patcher import LayerPatcher
+from invokeai.backend.patches.model_patch_raw import ModelPatchRaw
+from invokeai.backend.stable_diffusion.diffusion.conditioning_data import (
+    BasicConditioningInfo,
+    ConditioningFieldData,
+    SDXLConditioningInfo,
+)
+from invokeai.backend.util.devices import TorchDevice
 
-class ConditioningField(BaseModel):
-    conditioning_name: Optional[str] = Field(default=None, description="The name of conditioning data")
-
-    class Config:
-        schema_extra = {"required": ["conditioning_name"]}
-
-
-@dataclass
-class BasicConditioningInfo:
-    # type: Literal["basic_conditioning"] = "basic_conditioning"
-    embeds: torch.Tensor
-    extra_conditioning: Optional[InvokeAIDiffuserComponent.ExtraConditioningInfo]
-    # weight: float
-    # mode: ConditioningAlgo
-
-
-@dataclass
-class SDXLConditioningInfo(BasicConditioningInfo):
-    # type: Literal["sdxl_conditioning"] = "sdxl_conditioning"
-    pooled_embeds: torch.Tensor
-    add_time_ids: torch.Tensor
-
-
-ConditioningInfoType = Annotated[Union[BasicConditioningInfo, SDXLConditioningInfo], Field(discriminator="type")]
-
-
-@dataclass
-class ConditioningFieldData:
-    conditionings: List[Union[BasicConditioningInfo, SDXLConditioningInfo]]
-    # unconditioned: Optional[torch.Tensor]
+# unconditioned: Optional[torch.Tensor]
 
 
 # class ConditioningAlgo(str, Enum):
@@ -60,317 +38,240 @@ class ConditioningFieldData:
 #    PerpNeg = "perp_neg"
 
 
-class CompelOutput(BaseInvocationOutput):
-    """Compel parser output"""
-
-    # fmt: off
-    type: Literal["compel_output"] = "compel_output"
-
-    conditioning: ConditioningField = Field(default=None, description="Conditioning")
-    # fmt: on
-
-
+@invocation(
+    "compel",
+    title="Prompt",
+    tags=["prompt", "compel"],
+    category="conditioning",
+    version="1.2.0",
+)
 class CompelInvocation(BaseInvocation):
     """Parse prompt using compel package to conditioning."""
 
-    type: Literal["compel"] = "compel"
-
-    prompt: str = Field(default="", description="Prompt")
-    clip: ClipField = Field(None, description="Clip to use")
-
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {"title": "Prompt (Compel)", "tags": ["prompt", "compel"], "type_hints": {"model": "model"}},
-        }
+    prompt: str = InputField(
+        default="",
+        description=FieldDescriptions.compel_prompt,
+        ui_component=UIComponent.Textarea,
+    )
+    clip: CLIPField = InputField(
+        title="CLIP",
+        description=FieldDescriptions.clip,
+    )
+    mask: Optional[TensorField] = InputField(
+        default=None, description="A mask defining the region that this conditioning prompt applies to."
+    )
 
     @torch.no_grad()
-    def invoke(self, context: InvocationContext) -> CompelOutput:
-        tokenizer_info = context.services.model_manager.get_model(
-            **self.clip.tokenizer.dict(),
-            context=context,
-        )
-        text_encoder_info = context.services.model_manager.get_model(
-            **self.clip.text_encoder.dict(),
-            context=context,
-        )
-
-        def _lora_loader():
+    def invoke(self, context: InvocationContext) -> ConditioningOutput:
+        def _lora_loader() -> Iterator[Tuple[ModelPatchRaw, float]]:
             for lora in self.clip.loras:
-                lora_info = context.services.model_manager.get_model(**lora.dict(exclude={"weight"}), context=context)
-                yield (lora_info.context.model, lora.weight)
+                lora_info = context.models.load(lora.lora)
+                assert isinstance(lora_info.model, ModelPatchRaw)
+                yield (lora_info.model, lora.weight)
                 del lora_info
             return
 
-        # loras = [(context.services.model_manager.get_model(**lora.dict(exclude={"weight"})).context.model, lora.weight) for lora in self.clip.loras]
+        # loras = [(context.models.get(**lora.dict(exclude={"weight"})).context.model, lora.weight) for lora in self.clip.loras]
 
-        ti_list = []
-        for trigger in re.findall(r"<[a-zA-Z0-9., _-]+>", self.prompt):
-            name = trigger[1:-1]
-            try:
-                ti_list.append(
-                    (
-                        name,
-                        context.services.model_manager.get_model(
-                            model_name=name,
-                            base_model=self.clip.text_encoder.base_model,
-                            model_type=ModelType.TextualInversion,
-                            context=context,
-                        ).context.model,
-                    )
-                )
-            except ModelNotFoundException:
-                # print(e)
-                # import traceback
-                # print(traceback.format_exc())
-                print(f'Warn: trigger: "{trigger}" not found')
+        text_encoder_info = context.models.load(self.clip.text_encoder)
+        ti_list = generate_ti_list(self.prompt, text_encoder_info.config.base, context)
 
-        with ModelPatcher.apply_lora_text_encoder(
-            text_encoder_info.context.model, _lora_loader()
-        ), ModelPatcher.apply_ti(tokenizer_info.context.model, text_encoder_info.context.model, ti_list) as (
-            tokenizer,
-            ti_manager,
-        ), ModelPatcher.apply_clip_skip(
-            text_encoder_info.context.model, self.clip.skipped_layers
-        ), text_encoder_info as text_encoder:
+        with (
+            # apply all patches while the model is on the target device
+            text_encoder_info.model_on_device() as (cached_weights, text_encoder),
+            context.models.load(self.clip.tokenizer) as tokenizer,
+            LayerPatcher.apply_smart_model_patches(
+                model=text_encoder,
+                patches=_lora_loader(),
+                prefix="lora_te_",
+                dtype=text_encoder.dtype,
+                cached_weights=cached_weights,
+            ),
+            # Apply CLIP Skip after LoRA to prevent LoRA application from failing on skipped layers.
+            ModelPatcher.apply_clip_skip(text_encoder, self.clip.skipped_layers),
+            ModelPatcher.apply_ti(tokenizer, text_encoder, ti_list) as (
+                patched_tokenizer,
+                ti_manager,
+            ),
+        ):
+            context.util.signal_progress("Building conditioning")
+            assert isinstance(text_encoder, CLIPTextModel)
+            assert isinstance(tokenizer, CLIPTokenizer)
             compel = Compel(
-                tokenizer=tokenizer,
+                tokenizer=patched_tokenizer,
                 text_encoder=text_encoder,
                 textual_inversion_manager=ti_manager,
-                dtype_for_device_getter=torch_dtype,
-                truncate_long_prompts=True,
+                dtype_for_device_getter=TorchDevice.choose_torch_dtype,
+                truncate_long_prompts=False,
+                device=TorchDevice.choose_torch_device(),
             )
 
             conjunction = Compel.parse_prompt_string(self.prompt)
-            prompt: Union[FlattenedPrompt, Blend] = conjunction.prompts[0]
 
-            if context.services.configuration.log_tokenization:
-                log_tokenization_for_prompt_object(prompt, tokenizer)
+            if context.config.get().log_tokenization:
+                log_tokenization_for_conjunction(conjunction, patched_tokenizer)
 
-            c, options = compel.build_conditioning_tensor_for_prompt_object(prompt)
-
-            ec = InvokeAIDiffuserComponent.ExtraConditioningInfo(
-                tokens_count_including_eos_bos=get_max_token_count(tokenizer, conjunction),
-                cross_attention_control_args=options.get("cross_attention_control", None),
-            )
+            c, _options = compel.build_conditioning_tensor_for_conjunction(conjunction)
 
         c = c.detach().to("cpu")
 
-        conditioning_data = ConditioningFieldData(
-            conditionings=[
-                BasicConditioningInfo(
-                    embeds=c,
-                    extra_conditioning=ec,
-                )
-            ]
-        )
+        conditioning_data = ConditioningFieldData(conditionings=[BasicConditioningInfo(embeds=c)])
 
-        conditioning_name = f"{context.graph_execution_state_id}_{self.id}_conditioning"
-        context.services.latents.save(conditioning_name, conditioning_data)
-
-        return CompelOutput(
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return ConditioningOutput(
             conditioning=ConditioningField(
                 conditioning_name=conditioning_name,
-            ),
+                mask=self.mask,
+            )
         )
 
 
 class SDXLPromptInvocationBase:
-    def run_clip_raw(self, context, clip_field, prompt, get_pooled, lora_prefix):
-        tokenizer_info = context.services.model_manager.get_model(
-            **clip_field.tokenizer.dict(),
-            context=context,
-        )
-        text_encoder_info = context.services.model_manager.get_model(
-            **clip_field.text_encoder.dict(),
-            context=context,
-        )
+    """Prompt processor for SDXL models."""
 
-        def _lora_loader():
-            for lora in clip_field.loras:
-                lora_info = context.services.model_manager.get_model(**lora.dict(exclude={"weight"}), context=context)
-                yield (lora_info.context.model, lora.weight)
-                del lora_info
-            return
-
-        # loras = [(context.services.model_manager.get_model(**lora.dict(exclude={"weight"})).context.model, lora.weight) for lora in self.clip.loras]
-
-        ti_list = []
-        for trigger in re.findall(r"<[a-zA-Z0-9., _-]+>", prompt):
-            name = trigger[1:-1]
-            try:
-                ti_list.append(
-                    (
-                        name,
-                        context.services.model_manager.get_model(
-                            model_name=name,
-                            base_model=clip_field.text_encoder.base_model,
-                            model_type=ModelType.TextualInversion,
-                            context=context,
-                        ).context.model,
-                    )
-                )
-            except ModelNotFoundException:
-                # print(e)
-                # import traceback
-                # print(traceback.format_exc())
-                print(f'Warn: trigger: "{trigger}" not found')
-
-        with ModelPatcher.apply_lora(
-            text_encoder_info.context.model, _lora_loader(), lora_prefix
-        ), ModelPatcher.apply_ti(tokenizer_info.context.model, text_encoder_info.context.model, ti_list) as (
-            tokenizer,
-            ti_manager,
-        ), ModelPatcher.apply_clip_skip(
-            text_encoder_info.context.model, clip_field.skipped_layers
-        ), text_encoder_info as text_encoder:
-            text_inputs = tokenizer(
-                prompt,
-                padding="max_length",
-                max_length=tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            text_input_ids = text_inputs.input_ids
-            prompt_embeds = text_encoder(
-                text_input_ids.to(text_encoder.device),
-                output_hidden_states=True,
+    def run_clip_compel(
+        self,
+        context: InvocationContext,
+        clip_field: CLIPField,
+        prompt: str,
+        get_pooled: bool,
+        lora_prefix: str,
+        zero_on_empty: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        text_encoder_info = context.models.load(clip_field.text_encoder)
+        # return zero on empty
+        if prompt == "" and zero_on_empty:
+            cpu_text_encoder = text_encoder_info.model
+            assert isinstance(cpu_text_encoder, torch.nn.Module)
+            c = torch.zeros(
+                (
+                    1,
+                    cpu_text_encoder.config.max_position_embeddings,
+                    cpu_text_encoder.config.hidden_size,
+                ),
+                dtype=cpu_text_encoder.dtype,
             )
             if get_pooled:
-                c_pooled = prompt_embeds[0]
+                c_pooled = torch.zeros(
+                    (1, cpu_text_encoder.config.hidden_size),
+                    dtype=c.dtype,
+                )
             else:
                 c_pooled = None
-            c = prompt_embeds.hidden_states[-2]
+            return c, c_pooled
 
-        del tokenizer
-        del text_encoder
-        del tokenizer_info
-        del text_encoder_info
-
-        c = c.detach().to("cpu")
-        if c_pooled is not None:
-            c_pooled = c_pooled.detach().to("cpu")
-
-        return c, c_pooled, None
-
-    def run_clip_compel(self, context, clip_field, prompt, get_pooled, lora_prefix):
-        tokenizer_info = context.services.model_manager.get_model(
-            **clip_field.tokenizer.dict(),
-            context=context,
-        )
-        text_encoder_info = context.services.model_manager.get_model(
-            **clip_field.text_encoder.dict(),
-            context=context,
-        )
-
-        def _lora_loader():
+        def _lora_loader() -> Iterator[Tuple[ModelPatchRaw, float]]:
             for lora in clip_field.loras:
-                lora_info = context.services.model_manager.get_model(**lora.dict(exclude={"weight"}), context=context)
-                yield (lora_info.context.model, lora.weight)
+                lora_info = context.models.load(lora.lora)
+                lora_model = lora_info.model
+                assert isinstance(lora_model, ModelPatchRaw)
+                yield (lora_model, lora.weight)
                 del lora_info
             return
 
-        # loras = [(context.services.model_manager.get_model(**lora.dict(exclude={"weight"})).context.model, lora.weight) for lora in self.clip.loras]
+        # loras = [(context.models.get(**lora.dict(exclude={"weight"})).context.model, lora.weight) for lora in self.clip.loras]
 
-        ti_list = []
-        for trigger in re.findall(r"<[a-zA-Z0-9., _-]+>", prompt):
-            name = trigger[1:-1]
-            try:
-                ti_list.append(
-                    (
-                        name,
-                        context.services.model_manager.get_model(
-                            model_name=name,
-                            base_model=clip_field.text_encoder.base_model,
-                            model_type=ModelType.TextualInversion,
-                            context=context,
-                        ).context.model,
-                    )
-                )
-            except ModelNotFoundException:
-                # print(e)
-                # import traceback
-                # print(traceback.format_exc())
-                print(f'Warn: trigger: "{trigger}" not found')
+        ti_list = generate_ti_list(prompt, text_encoder_info.config.base, context)
 
-        with ModelPatcher.apply_lora(
-            text_encoder_info.context.model, _lora_loader(), lora_prefix
-        ), ModelPatcher.apply_ti(tokenizer_info.context.model, text_encoder_info.context.model, ti_list) as (
-            tokenizer,
-            ti_manager,
-        ), ModelPatcher.apply_clip_skip(
-            text_encoder_info.context.model, clip_field.skipped_layers
-        ), text_encoder_info as text_encoder:
+        with (
+            # apply all patches while the model is on the target device
+            text_encoder_info.model_on_device() as (cached_weights, text_encoder),
+            context.models.load(clip_field.tokenizer) as tokenizer,
+            LayerPatcher.apply_smart_model_patches(
+                model=text_encoder,
+                patches=_lora_loader(),
+                prefix=lora_prefix,
+                dtype=text_encoder.dtype,
+                cached_weights=cached_weights,
+            ),
+            # Apply CLIP Skip after LoRA to prevent LoRA application from failing on skipped layers.
+            ModelPatcher.apply_clip_skip(text_encoder, clip_field.skipped_layers),
+            ModelPatcher.apply_ti(tokenizer, text_encoder, ti_list) as (
+                patched_tokenizer,
+                ti_manager,
+            ),
+        ):
+            context.util.signal_progress("Building conditioning")
+            assert isinstance(text_encoder, (CLIPTextModel, CLIPTextModelWithProjection))
+            assert isinstance(tokenizer, CLIPTokenizer)
+
+            text_encoder = cast(CLIPTextModel, text_encoder)
             compel = Compel(
-                tokenizer=tokenizer,
+                tokenizer=patched_tokenizer,
                 text_encoder=text_encoder,
                 textual_inversion_manager=ti_manager,
-                dtype_for_device_getter=torch_dtype,
-                truncate_long_prompts=True,  # TODO:
+                dtype_for_device_getter=TorchDevice.choose_torch_dtype,
+                truncate_long_prompts=False,  # TODO:
                 returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,  # TODO: clip skip
-                requires_pooled=True,
+                requires_pooled=get_pooled,
+                device=TorchDevice.choose_torch_device(),
             )
 
             conjunction = Compel.parse_prompt_string(prompt)
 
-            if context.services.configuration.log_tokenization:
+            if context.config.get().log_tokenization:
                 # TODO: better logging for and syntax
-                for prompt_obj in conjunction.prompts:
-                    log_tokenization_for_prompt_object(prompt_obj, tokenizer)
+                log_tokenization_for_conjunction(conjunction, patched_tokenizer)
 
             # TODO: ask for optimizations? to not run text_encoder twice
-            c, options = compel.build_conditioning_tensor_for_conjunction(conjunction)
+            c, _options = compel.build_conditioning_tensor_for_conjunction(conjunction)
             if get_pooled:
                 c_pooled = compel.conditioning_provider.get_pooled_embeddings([prompt])
             else:
                 c_pooled = None
 
-            ec = InvokeAIDiffuserComponent.ExtraConditioningInfo(
-                tokens_count_including_eos_bos=get_max_token_count(tokenizer, conjunction),
-                cross_attention_control_args=options.get("cross_attention_control", None),
-            )
-
         del tokenizer
         del text_encoder
-        del tokenizer_info
         del text_encoder_info
 
         c = c.detach().to("cpu")
         if c_pooled is not None:
             c_pooled = c_pooled.detach().to("cpu")
 
-        return c, c_pooled, ec
+        return c, c_pooled
 
 
+@invocation(
+    "sdxl_compel_prompt",
+    title="SDXL Prompt",
+    tags=["sdxl", "compel", "prompt"],
+    category="conditioning",
+    version="1.2.0",
+)
 class SDXLCompelPromptInvocation(BaseInvocation, SDXLPromptInvocationBase):
     """Parse prompt using compel package to conditioning."""
 
-    type: Literal["sdxl_compel_prompt"] = "sdxl_compel_prompt"
-
-    prompt: str = Field(default="", description="Prompt")
-    style: str = Field(default="", description="Style prompt")
-    original_width: int = Field(1024, description="")
-    original_height: int = Field(1024, description="")
-    crop_top: int = Field(0, description="")
-    crop_left: int = Field(0, description="")
-    target_width: int = Field(1024, description="")
-    target_height: int = Field(1024, description="")
-    clip: ClipField = Field(None, description="Clip to use")
-    clip2: ClipField = Field(None, description="Clip2 to use")
-
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {"title": "SDXL Prompt (Compel)", "tags": ["prompt", "compel"], "type_hints": {"model": "model"}},
-        }
+    prompt: str = InputField(
+        default="",
+        description=FieldDescriptions.compel_prompt,
+        ui_component=UIComponent.Textarea,
+    )
+    style: str = InputField(
+        default="",
+        description=FieldDescriptions.compel_prompt,
+        ui_component=UIComponent.Textarea,
+    )
+    original_width: int = InputField(default=1024, description="")
+    original_height: int = InputField(default=1024, description="")
+    crop_top: int = InputField(default=0, description="")
+    crop_left: int = InputField(default=0, description="")
+    target_width: int = InputField(default=1024, description="")
+    target_height: int = InputField(default=1024, description="")
+    clip: CLIPField = InputField(description=FieldDescriptions.clip, input=Input.Connection, title="CLIP 1")
+    clip2: CLIPField = InputField(description=FieldDescriptions.clip, input=Input.Connection, title="CLIP 2")
+    mask: Optional[TensorField] = InputField(
+        default=None, description="A mask defining the region that this conditioning prompt applies to."
+    )
 
     @torch.no_grad()
-    def invoke(self, context: InvocationContext) -> CompelOutput:
-        c1, c1_pooled, ec1 = self.run_clip_compel(context, self.clip, self.prompt, False, "lora_te1_")
+    def invoke(self, context: InvocationContext) -> ConditioningOutput:
+        c1, c1_pooled = self.run_clip_compel(context, self.clip, self.prompt, False, "lora_te1_", zero_on_empty=True)
         if self.style.strip() == "":
-            c2, c2_pooled, ec2 = self.run_clip_compel(context, self.clip2, self.prompt, True, "lora_te2_")
+            c2, c2_pooled = self.run_clip_compel(
+                context, self.clip2, self.prompt, True, "lora_te2_", zero_on_empty=True
+            )
         else:
-            c2, c2_pooled, ec2 = self.run_clip_compel(context, self.clip2, self.style, True, "lora_te2_")
+            c2, c2_pooled = self.run_clip_compel(context, self.clip2, self.style, True, "lora_te2_", zero_on_empty=True)
 
         original_size = (self.original_height, self.original_width)
         crop_coords = (self.crop_top, self.crop_left)
@@ -378,221 +279,125 @@ class SDXLCompelPromptInvocation(BaseInvocation, SDXLPromptInvocationBase):
 
         add_time_ids = torch.tensor([original_size + crop_coords + target_size])
 
+        # [1, 77, 768], [1, 154, 1280]
+        if c1.shape[1] < c2.shape[1]:
+            c1 = torch.cat(
+                [
+                    c1,
+                    torch.zeros(
+                        (c1.shape[0], c2.shape[1] - c1.shape[1], c1.shape[2]),
+                        device=c1.device,
+                        dtype=c1.dtype,
+                    ),
+                ],
+                dim=1,
+            )
+
+        elif c1.shape[1] > c2.shape[1]:
+            c2 = torch.cat(
+                [
+                    c2,
+                    torch.zeros(
+                        (c2.shape[0], c1.shape[1] - c2.shape[1], c2.shape[2]),
+                        device=c2.device,
+                        dtype=c2.dtype,
+                    ),
+                ],
+                dim=1,
+            )
+
+        assert c2_pooled is not None
         conditioning_data = ConditioningFieldData(
             conditionings=[
                 SDXLConditioningInfo(
-                    embeds=torch.cat([c1, c2], dim=-1),
-                    pooled_embeds=c2_pooled,
-                    add_time_ids=add_time_ids,
-                    extra_conditioning=ec1,
+                    embeds=torch.cat([c1, c2], dim=-1), pooled_embeds=c2_pooled, add_time_ids=add_time_ids
                 )
             ]
         )
 
-        conditioning_name = f"{context.graph_execution_state_id}_{self.id}_conditioning"
-        context.services.latents.save(conditioning_name, conditioning_data)
+        conditioning_name = context.conditioning.save(conditioning_data)
 
-        return CompelOutput(
+        return ConditioningOutput(
             conditioning=ConditioningField(
                 conditioning_name=conditioning_name,
-            ),
+                mask=self.mask,
+            )
         )
 
 
+@invocation(
+    "sdxl_refiner_compel_prompt",
+    title="SDXL Refiner Prompt",
+    tags=["sdxl", "compel", "prompt"],
+    category="conditioning",
+    version="1.1.1",
+)
 class SDXLRefinerCompelPromptInvocation(BaseInvocation, SDXLPromptInvocationBase):
     """Parse prompt using compel package to conditioning."""
 
-    type: Literal["sdxl_refiner_compel_prompt"] = "sdxl_refiner_compel_prompt"
-
-    style: str = Field(default="", description="Style prompt")  # TODO: ?
-    original_width: int = Field(1024, description="")
-    original_height: int = Field(1024, description="")
-    crop_top: int = Field(0, description="")
-    crop_left: int = Field(0, description="")
-    aesthetic_score: float = Field(6.0, description="")
-    clip2: ClipField = Field(None, description="Clip to use")
-
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {
-                "title": "SDXL Refiner Prompt (Compel)",
-                "tags": ["prompt", "compel"],
-                "type_hints": {"model": "model"},
-            },
-        }
+    style: str = InputField(
+        default="",
+        description=FieldDescriptions.compel_prompt,
+        ui_component=UIComponent.Textarea,
+    )  # TODO: ?
+    original_width: int = InputField(default=1024, description="")
+    original_height: int = InputField(default=1024, description="")
+    crop_top: int = InputField(default=0, description="")
+    crop_left: int = InputField(default=0, description="")
+    aesthetic_score: float = InputField(default=6.0, description=FieldDescriptions.sdxl_aesthetic)
+    clip2: CLIPField = InputField(description=FieldDescriptions.clip, input=Input.Connection)
 
     @torch.no_grad()
-    def invoke(self, context: InvocationContext) -> CompelOutput:
+    def invoke(self, context: InvocationContext) -> ConditioningOutput:
         # TODO: if there will appear lora for refiner - write proper prefix
-        c2, c2_pooled, ec2 = self.run_clip_compel(context, self.clip2, self.style, True, "<NONE>")
+        c2, c2_pooled = self.run_clip_compel(context, self.clip2, self.style, True, "<NONE>", zero_on_empty=False)
 
         original_size = (self.original_height, self.original_width)
         crop_coords = (self.crop_top, self.crop_left)
 
         add_time_ids = torch.tensor([original_size + crop_coords + (self.aesthetic_score,)])
 
+        assert c2_pooled is not None
         conditioning_data = ConditioningFieldData(
-            conditionings=[
-                SDXLConditioningInfo(
-                    embeds=c2,
-                    pooled_embeds=c2_pooled,
-                    add_time_ids=add_time_ids,
-                    extra_conditioning=ec2,  # or None
-                )
-            ]
+            conditionings=[SDXLConditioningInfo(embeds=c2, pooled_embeds=c2_pooled, add_time_ids=add_time_ids)]
         )
 
-        conditioning_name = f"{context.graph_execution_state_id}_{self.id}_conditioning"
-        context.services.latents.save(conditioning_name, conditioning_data)
+        conditioning_name = context.conditioning.save(conditioning_data)
 
-        return CompelOutput(
-            conditioning=ConditioningField(
-                conditioning_name=conditioning_name,
-            ),
-        )
+        return ConditioningOutput.build(conditioning_name)
 
 
-class SDXLRawPromptInvocation(BaseInvocation, SDXLPromptInvocationBase):
-    """Pass unmodified prompt to conditioning without compel processing."""
+@invocation_output("clip_skip_output")
+class CLIPSkipInvocationOutput(BaseInvocationOutput):
+    """CLIP skip node output"""
 
-    type: Literal["sdxl_raw_prompt"] = "sdxl_raw_prompt"
-
-    prompt: str = Field(default="", description="Prompt")
-    style: str = Field(default="", description="Style prompt")
-    original_width: int = Field(1024, description="")
-    original_height: int = Field(1024, description="")
-    crop_top: int = Field(0, description="")
-    crop_left: int = Field(0, description="")
-    target_width: int = Field(1024, description="")
-    target_height: int = Field(1024, description="")
-    clip: ClipField = Field(None, description="Clip to use")
-    clip2: ClipField = Field(None, description="Clip2 to use")
-
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {"title": "SDXL Prompt (Raw)", "tags": ["prompt", "compel"], "type_hints": {"model": "model"}},
-        }
-
-    @torch.no_grad()
-    def invoke(self, context: InvocationContext) -> CompelOutput:
-        c1, c1_pooled, ec1 = self.run_clip_raw(context, self.clip, self.prompt, False, "lora_te1_")
-        if self.style.strip() == "":
-            c2, c2_pooled, ec2 = self.run_clip_raw(context, self.clip2, self.prompt, True, "lora_te2_")
-        else:
-            c2, c2_pooled, ec2 = self.run_clip_raw(context, self.clip2, self.style, True, "lora_te2_")
-
-        original_size = (self.original_height, self.original_width)
-        crop_coords = (self.crop_top, self.crop_left)
-        target_size = (self.target_height, self.target_width)
-
-        add_time_ids = torch.tensor([original_size + crop_coords + target_size])
-
-        conditioning_data = ConditioningFieldData(
-            conditionings=[
-                SDXLConditioningInfo(
-                    embeds=torch.cat([c1, c2], dim=-1),
-                    pooled_embeds=c2_pooled,
-                    add_time_ids=add_time_ids,
-                    extra_conditioning=ec1,
-                )
-            ]
-        )
-
-        conditioning_name = f"{context.graph_execution_state_id}_{self.id}_conditioning"
-        context.services.latents.save(conditioning_name, conditioning_data)
-
-        return CompelOutput(
-            conditioning=ConditioningField(
-                conditioning_name=conditioning_name,
-            ),
-        )
+    clip: Optional[CLIPField] = OutputField(default=None, description=FieldDescriptions.clip, title="CLIP")
 
 
-class SDXLRefinerRawPromptInvocation(BaseInvocation, SDXLPromptInvocationBase):
-    """Parse prompt using compel package to conditioning."""
-
-    type: Literal["sdxl_refiner_raw_prompt"] = "sdxl_refiner_raw_prompt"
-
-    style: str = Field(default="", description="Style prompt")  # TODO: ?
-    original_width: int = Field(1024, description="")
-    original_height: int = Field(1024, description="")
-    crop_top: int = Field(0, description="")
-    crop_left: int = Field(0, description="")
-    aesthetic_score: float = Field(6.0, description="")
-    clip2: ClipField = Field(None, description="Clip to use")
-
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {
-                "title": "SDXL Refiner Prompt (Raw)",
-                "tags": ["prompt", "compel"],
-                "type_hints": {"model": "model"},
-            },
-        }
-
-    @torch.no_grad()
-    def invoke(self, context: InvocationContext) -> CompelOutput:
-        # TODO: if there will appear lora for refiner - write proper prefix
-        c2, c2_pooled, ec2 = self.run_clip_raw(context, self.clip2, self.style, True, "<NONE>")
-
-        original_size = (self.original_height, self.original_width)
-        crop_coords = (self.crop_top, self.crop_left)
-
-        add_time_ids = torch.tensor([original_size + crop_coords + (self.aesthetic_score,)])
-
-        conditioning_data = ConditioningFieldData(
-            conditionings=[
-                SDXLConditioningInfo(
-                    embeds=c2,
-                    pooled_embeds=c2_pooled,
-                    add_time_ids=add_time_ids,
-                    extra_conditioning=ec2,  # or None
-                )
-            ]
-        )
-
-        conditioning_name = f"{context.graph_execution_state_id}_{self.id}_conditioning"
-        context.services.latents.save(conditioning_name, conditioning_data)
-
-        return CompelOutput(
-            conditioning=ConditioningField(
-                conditioning_name=conditioning_name,
-            ),
-        )
-
-
-class ClipSkipInvocationOutput(BaseInvocationOutput):
-    """Clip skip node output"""
-
-    type: Literal["clip_skip_output"] = "clip_skip_output"
-    clip: ClipField = Field(None, description="Clip with skipped layers")
-
-
-class ClipSkipInvocation(BaseInvocation):
+@invocation(
+    "clip_skip",
+    title="CLIP Skip",
+    tags=["clipskip", "clip", "skip"],
+    category="conditioning",
+    version="1.1.0",
+)
+class CLIPSkipInvocation(BaseInvocation):
     """Skip layers in clip text_encoder model."""
 
-    type: Literal["clip_skip"] = "clip_skip"
+    clip: CLIPField = InputField(description=FieldDescriptions.clip, input=Input.Connection, title="CLIP")
+    skipped_layers: int = InputField(default=0, ge=0, description=FieldDescriptions.skipped_layers)
 
-    clip: ClipField = Field(None, description="Clip to use")
-    skipped_layers: int = Field(0, description="Number of layers to skip in text_encoder")
-
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {"title": "CLIP Skip", "tags": ["clip", "skip"]},
-        }
-
-    def invoke(self, context: InvocationContext) -> ClipSkipInvocationOutput:
+    def invoke(self, context: InvocationContext) -> CLIPSkipInvocationOutput:
         self.clip.skipped_layers += self.skipped_layers
-        return ClipSkipInvocationOutput(
+        return CLIPSkipInvocationOutput(
             clip=self.clip,
         )
 
 
 def get_max_token_count(
-    tokenizer, prompt: Union[FlattenedPrompt, Blend, Conjunction], truncate_if_too_long=False
+    tokenizer: CLIPTokenizer,
+    prompt: Union[FlattenedPrompt, Blend, Conjunction],
+    truncate_if_too_long: bool = False,
 ) -> int:
     if type(prompt) is Blend:
         blend: Blend = prompt
@@ -604,35 +409,44 @@ def get_max_token_count(
         return len(get_tokens_for_prompt_object(tokenizer, prompt, truncate_if_too_long))
 
 
-def get_tokens_for_prompt_object(tokenizer, parsed_prompt: FlattenedPrompt, truncate_if_too_long=True) -> List[str]:
+def get_tokens_for_prompt_object(
+    tokenizer: CLIPTokenizer, parsed_prompt: FlattenedPrompt, truncate_if_too_long: bool = True
+) -> List[str]:
     if type(parsed_prompt) is Blend:
         raise ValueError("Blend is not supported here - you need to get tokens for each of its .children")
 
     text_fragments = [
-        x.text
-        if type(x) is Fragment
-        else (" ".join([f.text for f in x.original]) if type(x) is CrossAttentionControlSubstitute else str(x))
+        (
+            x.text
+            if type(x) is Fragment
+            else (" ".join([f.text for f in x.original]) if type(x) is CrossAttentionControlSubstitute else str(x))
+        )
         for x in parsed_prompt.children
     ]
     text = " ".join(text_fragments)
-    tokens = tokenizer.tokenize(text)
+    tokens: List[str] = tokenizer.tokenize(text)
     if truncate_if_too_long:
         max_tokens_length = tokenizer.model_max_length - 2  # typically 75
         tokens = tokens[0:max_tokens_length]
     return tokens
 
 
-def log_tokenization_for_conjunction(c: Conjunction, tokenizer, display_label_prefix=None):
+def log_tokenization_for_conjunction(
+    c: Conjunction, tokenizer: CLIPTokenizer, display_label_prefix: Optional[str] = None
+) -> None:
     display_label_prefix = display_label_prefix or ""
     for i, p in enumerate(c.prompts):
         if len(c.prompts) > 1:
             this_display_label_prefix = f"{display_label_prefix}(conjunction part {i + 1}, weight={c.weights[i]})"
         else:
+            assert display_label_prefix is not None
             this_display_label_prefix = display_label_prefix
         log_tokenization_for_prompt_object(p, tokenizer, display_label_prefix=this_display_label_prefix)
 
 
-def log_tokenization_for_prompt_object(p: Union[Blend, FlattenedPrompt], tokenizer, display_label_prefix=None):
+def log_tokenization_for_prompt_object(
+    p: Union[Blend, FlattenedPrompt], tokenizer: CLIPTokenizer, display_label_prefix: Optional[str] = None
+) -> None:
     display_label_prefix = display_label_prefix or ""
     if type(p) is Blend:
         blend: Blend = p
@@ -672,7 +486,12 @@ def log_tokenization_for_prompt_object(p: Union[Blend, FlattenedPrompt], tokeniz
             log_tokenization_for_text(text, tokenizer, display_label=display_label_prefix)
 
 
-def log_tokenization_for_text(text, tokenizer, display_label=None, truncate_if_too_long=False):
+def log_tokenization_for_text(
+    text: str,
+    tokenizer: CLIPTokenizer,
+    display_label: Optional[str] = None,
+    truncate_if_too_long: Optional[bool] = False,
+) -> None:
     """shows how the prompt is tokenized
     # usually tokens have '</w>' to indicate end-of-word,
     # but for readability it has been replaced with ' '

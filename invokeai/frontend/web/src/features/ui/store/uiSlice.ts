@@ -1,127 +1,102 @@
 import type { PayloadAction } from '@reduxjs/toolkit';
-import { createSlice } from '@reduxjs/toolkit';
-import { initialImageChanged } from 'features/parameters/store/generationSlice';
-import { SchedulerParam } from 'features/parameters/types/parameterSchemas';
-import { setActiveTabReducer } from './extraReducers';
-import { InvokeTabName } from './tabMap';
-import { UIState } from './uiTypes';
+import { createSelector, createSlice } from '@reduxjs/toolkit';
+import type { PersistConfig, RootState } from 'app/store/store';
+import { newSessionRequested } from 'features/controlLayers/store/actions';
+import { workflowLoadRequested } from 'features/nodes/store/actions';
+import { atom } from 'nanostores';
 
-export const initialUIState: UIState = {
-  activeTab: 0,
-  shouldPinParametersPanel: true,
-  shouldShowParametersPanel: true,
+import type { CanvasRightPanelTabName, TabName, UIState } from './uiTypes';
+
+const initialUIState: UIState = {
+  _version: 3,
+  activeTab: 'canvas',
+  activeTabCanvasRightPanel: 'gallery',
   shouldShowImageDetails: false,
-  shouldUseCanvasBetaLayout: false,
-  shouldShowExistingModelsInSearch: false,
-  shouldUseSliders: false,
-  shouldPinGallery: true,
-  shouldShowGallery: true,
-  shouldHidePreview: false,
   shouldShowProgressInViewer: true,
-  shouldShowEmbeddingPicker: false,
-  favoriteSchedulers: [],
+  accordions: {},
+  expanders: {},
+  shouldShowNotificationV2: true,
 };
 
 export const uiSlice = createSlice({
   name: 'ui',
   initialState: initialUIState,
   reducers: {
-    setActiveTab: (state, action: PayloadAction<InvokeTabName>) => {
-      setActiveTabReducer(state, action.payload);
+    setActiveTab: (state, action: PayloadAction<TabName>) => {
+      state.activeTab = action.payload;
     },
-    setShouldPinParametersPanel: (state, action: PayloadAction<boolean>) => {
-      state.shouldPinParametersPanel = action.payload;
-      state.shouldShowParametersPanel = true;
-    },
-    setShouldShowParametersPanel: (state, action: PayloadAction<boolean>) => {
-      state.shouldShowParametersPanel = action.payload;
+    activeTabCanvasRightPanelChanged: (state, action: PayloadAction<CanvasRightPanelTabName>) => {
+      state.activeTabCanvasRightPanel = action.payload;
     },
     setShouldShowImageDetails: (state, action: PayloadAction<boolean>) => {
       state.shouldShowImageDetails = action.payload;
     },
-    setShouldUseCanvasBetaLayout: (state, action: PayloadAction<boolean>) => {
-      state.shouldUseCanvasBetaLayout = action.payload;
-    },
-    setShouldHidePreview: (state, action: PayloadAction<boolean>) => {
-      state.shouldHidePreview = action.payload;
-    },
-    setShouldShowExistingModelsInSearch: (
-      state,
-      action: PayloadAction<boolean>
-    ) => {
-      state.shouldShowExistingModelsInSearch = action.payload;
-    },
-    setShouldUseSliders: (state, action: PayloadAction<boolean>) => {
-      state.shouldUseSliders = action.payload;
-    },
-    setShouldShowGallery: (state, action: PayloadAction<boolean>) => {
-      state.shouldShowGallery = action.payload;
-    },
-    togglePinGalleryPanel: (state) => {
-      state.shouldPinGallery = !state.shouldPinGallery;
-      if (!state.shouldPinGallery) {
-        state.shouldShowGallery = true;
-      }
-    },
-    togglePinParametersPanel: (state) => {
-      state.shouldPinParametersPanel = !state.shouldPinParametersPanel;
-      if (!state.shouldPinParametersPanel) {
-        state.shouldShowParametersPanel = true;
-      }
-    },
-    toggleParametersPanel: (state) => {
-      state.shouldShowParametersPanel = !state.shouldShowParametersPanel;
-    },
-    toggleGalleryPanel: (state) => {
-      state.shouldShowGallery = !state.shouldShowGallery;
-    },
-    togglePanels: (state) => {
-      if (state.shouldShowGallery || state.shouldShowParametersPanel) {
-        state.shouldShowGallery = false;
-        state.shouldShowParametersPanel = false;
-      } else {
-        state.shouldShowGallery = true;
-        state.shouldShowParametersPanel = true;
-      }
-    },
     setShouldShowProgressInViewer: (state, action: PayloadAction<boolean>) => {
       state.shouldShowProgressInViewer = action.payload;
     },
-    favoriteSchedulersChanged: (
-      state,
-      action: PayloadAction<SchedulerParam[]>
-    ) => {
-      state.favoriteSchedulers = action.payload;
+    accordionStateChanged: (state, action: PayloadAction<{ id: string; isOpen: boolean }>) => {
+      const { id, isOpen } = action.payload;
+      state.accordions[id] = isOpen;
     },
-    toggleEmbeddingPicker: (state) => {
-      state.shouldShowEmbeddingPicker = !state.shouldShowEmbeddingPicker;
+    expanderStateChanged: (state, action: PayloadAction<{ id: string; isOpen: boolean }>) => {
+      const { id, isOpen } = action.payload;
+      state.expanders[id] = isOpen;
+    },
+    shouldShowNotificationChanged: (state, action: PayloadAction<boolean>) => {
+      state.shouldShowNotificationV2 = action.payload;
     },
   },
   extraReducers(builder) {
-    builder.addCase(initialImageChanged, (state) => {
-      setActiveTabReducer(state, 'img2img');
+    builder.addCase(workflowLoadRequested, (state) => {
+      state.activeTab = 'workflows';
+    });
+    builder.addMatcher(newSessionRequested, (state) => {
+      state.activeTab = 'canvas';
     });
   },
 });
 
 export const {
   setActiveTab,
-  setShouldPinParametersPanel,
-  setShouldShowParametersPanel,
+  activeTabCanvasRightPanelChanged,
   setShouldShowImageDetails,
-  setShouldUseCanvasBetaLayout,
-  setShouldShowExistingModelsInSearch,
-  setShouldUseSliders,
-  setShouldHidePreview,
-  setShouldShowGallery,
-  togglePanels,
-  togglePinGalleryPanel,
-  togglePinParametersPanel,
-  toggleParametersPanel,
-  toggleGalleryPanel,
   setShouldShowProgressInViewer,
-  favoriteSchedulersChanged,
-  toggleEmbeddingPicker,
+  accordionStateChanged,
+  expanderStateChanged,
+  shouldShowNotificationChanged,
 } = uiSlice.actions;
 
-export default uiSlice.reducer;
+export const selectUiSlice = (state: RootState) => state.ui;
+
+/* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+const migrateUIState = (state: any): any => {
+  if (!('_version' in state)) {
+    state._version = 1;
+  }
+  if (state._version === 1) {
+    state.activeTab = 'generation';
+    state._version = 2;
+  }
+  if (state._version === 2) {
+    state.activeTab = 'canvas';
+    state._version = 3;
+  }
+  return state;
+};
+
+export const uiPersistConfig: PersistConfig<UIState> = {
+  name: uiSlice.name,
+  initialState: initialUIState,
+  migrate: migrateUIState,
+  persistDenylist: ['shouldShowImageDetails'],
+};
+
+const TABS_WITH_LEFT_PANEL: TabName[] = ['canvas', 'upscaling', 'workflows'] as const;
+export const LEFT_PANEL_MIN_SIZE_PX = 400;
+export const $isLeftPanelOpen = atom(true);
+export const selectWithLeftPanel = createSelector(selectUiSlice, (ui) => TABS_WITH_LEFT_PANEL.includes(ui.activeTab));
+
+const TABS_WITH_RIGHT_PANEL: TabName[] = ['canvas', 'upscaling', 'workflows'] as const;
+export const RIGHT_PANEL_MIN_SIZE_PX = 390;
+export const $isRightPanelOpen = atom(true);
+export const selectWithRightPanel = createSelector(selectUiSlice, (ui) => TABS_WITH_RIGHT_PANEL.includes(ui.activeTab));

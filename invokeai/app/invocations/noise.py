@@ -1,20 +1,15 @@
 # Copyright (c) 2023 Kyle Schouviller (https://github.com/kyle0654) & the InvokeAI Team
 
-import math
-from typing import Literal
 
-from pydantic import Field, validator
 import torch
-from invokeai.app.invocations.latent import LatentsField
+from pydantic import field_validator
 
-from invokeai.app.util.misc import SEED_MAX, get_random_seed
-from ...backend.util.devices import choose_torch_device, torch_dtype
-from .baseinvocation import (
-    BaseInvocation,
-    BaseInvocationOutput,
-    InvocationConfig,
-    InvocationContext,
-)
+from invokeai.app.invocations.baseinvocation import BaseInvocation, BaseInvocationOutput, invocation, invocation_output
+from invokeai.app.invocations.constants import LATENT_SCALE_FACTOR
+from invokeai.app.invocations.fields import FieldDescriptions, InputField, LatentsField, OutputField
+from invokeai.app.services.shared.invocation_context import InvocationContext
+from invokeai.app.util.misc import SEED_MAX
+from invokeai.backend.util.devices import TorchDevice
 
 """
 Utilities
@@ -45,7 +40,7 @@ def get_noise(
             height // downsampling_factor,
             width // downsampling_factor,
         ],
-        dtype=torch_dtype(device),
+        dtype=TorchDevice.choose_torch_dtype(device=device),
         device=noise_device_type,
         generator=generator,
     ).to("cpu")
@@ -58,78 +53,68 @@ Nodes
 """
 
 
+@invocation_output("noise_output")
 class NoiseOutput(BaseInvocationOutput):
     """Invocation noise output"""
 
-    # fmt: off
-    type:  Literal["noise_output"] = "noise_output"
+    noise: LatentsField = OutputField(description=FieldDescriptions.noise)
+    width: int = OutputField(description=FieldDescriptions.width)
+    height: int = OutputField(description=FieldDescriptions.height)
 
-    # Inputs
-    noise: LatentsField            = Field(default=None, description="The output noise")
-    width:                     int = Field(description="The width of the noise in pixels")
-    height:                    int = Field(description="The height of the noise in pixels")
-    # fmt: on
-
-
-def build_noise_output(latents_name: str, latents: torch.Tensor):
-    return NoiseOutput(
-        noise=LatentsField(latents_name=latents_name),
-        width=latents.size()[3] * 8,
-        height=latents.size()[2] * 8,
-    )
+    @classmethod
+    def build(cls, latents_name: str, latents: torch.Tensor, seed: int) -> "NoiseOutput":
+        return cls(
+            noise=LatentsField(latents_name=latents_name, seed=seed),
+            width=latents.size()[3] * LATENT_SCALE_FACTOR,
+            height=latents.size()[2] * LATENT_SCALE_FACTOR,
+        )
 
 
+@invocation(
+    "noise",
+    title="Noise",
+    tags=["latents", "noise"],
+    category="latents",
+    version="1.0.2",
+)
 class NoiseInvocation(BaseInvocation):
     """Generates latent noise."""
 
-    type: Literal["noise"] = "noise"
-
-    # Inputs
-    seed: int = Field(
+    seed: int = InputField(
+        default=0,
         ge=0,
         le=SEED_MAX,
-        description="The seed to use",
-        default_factory=get_random_seed,
+        description=FieldDescriptions.seed,
     )
-    width: int = Field(
+    width: int = InputField(
         default=512,
-        multiple_of=8,
+        multiple_of=LATENT_SCALE_FACTOR,
         gt=0,
-        description="The width of the resulting noise",
+        description=FieldDescriptions.width,
     )
-    height: int = Field(
+    height: int = InputField(
         default=512,
-        multiple_of=8,
+        multiple_of=LATENT_SCALE_FACTOR,
         gt=0,
-        description="The height of the resulting noise",
+        description=FieldDescriptions.height,
     )
-    use_cpu: bool = Field(
+    use_cpu: bool = InputField(
         default=True,
         description="Use CPU for noise generation (for reproducible results across platforms)",
     )
 
-    # Schema customisation
-    class Config(InvocationConfig):
-        schema_extra = {
-            "ui": {
-                "title": "Noise",
-                "tags": ["latents", "noise"],
-            },
-        }
-
-    @validator("seed", pre=True)
+    @field_validator("seed", mode="before")
     def modulo_seed(cls, v):
-        """Returns the seed modulo (SEED_MAX + 1) to ensure it is within the valid range."""
+        """Return the seed modulo (SEED_MAX + 1) to ensure it is within the valid range."""
         return v % (SEED_MAX + 1)
 
     def invoke(self, context: InvocationContext) -> NoiseOutput:
         noise = get_noise(
             width=self.width,
             height=self.height,
-            device=choose_torch_device(),
+            device=TorchDevice.choose_torch_device(),
             seed=self.seed,
             use_cpu=self.use_cpu,
         )
-        name = f"{context.graph_execution_state_id}__{self.id}"
-        context.services.latents.save(name, noise)
-        return build_noise_output(latents_name=name, latents=noise)
+        name = context.tensors.save(tensor=noise)
+        return NoiseOutput.build(latents_name=name, latents=noise, seed=self.seed)
